@@ -1,6 +1,6 @@
-FROM public.ecr.aws/lambda/python:3.11
+FROM public.ecr.aws/lambda/python:3.12
 
-RUN pip install --no-cache-dir \
+RUN pip install --no-cache-dir --only-binary :all: \
     lightgbm==4.3.0 \
     numpy \
     scipy
