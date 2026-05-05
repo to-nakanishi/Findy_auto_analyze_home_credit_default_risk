@@ -206,6 +206,71 @@ gap_features = comparison_df.assign(gap=abs(comparison_df['LGBM_pct'] - comparis
 print(f"\n■ モデル間で評価が大きく分かれた項目 (多様性):")
 print(gap_features.sort_values(by='gap', ascending=False).head(5)[['feature', 'LGBM_pct', 'CAT_pct']].to_markdown(index=False))
 
+#2-4　寄与度確認　アンサンブル　可視化
+
+plot_df = ensemble_top20.copy()
+plot_df = plot_df[plot_df['Ensemble_pct'] >= 1.0]  # 1%以上のみ
+plot_df = plot_df.sort_values(by='Ensemble_pct', ascending=True)
+
+fig, ax = plt.subplots(figsize=(10, 5), dpi=100)
+
+n = len(plot_df)
+cmap = plt.cm.get_cmap('viridis', n)
+bar_colors = [cmap(i) for i in range(n)]
+
+# 枠線
+for spine in ["top", "right", "left"]:
+    ax.spines[spine].set_visible(False)
+ax.spines["bottom"].set_color("#CCCCCC")
+
+# 各特徴量のアンサンブル寄与度（LGBM + CatBoost）
+lgbm_vals = plot_df['LGBM_pct'] * w_lgbm
+cat_vals  = plot_df['CAT_pct'] * (1 - w_lgbm)
+total_vals = lgbm_vals.values + cat_vals.values
+
+# LGBM部分
+bars_lgbm = ax.barh(
+    plot_df['feature'], lgbm_vals,
+    color=bar_colors, alpha=0.85,
+    label=f'LGBM (w={w_lgbm:.2f})'
+)
+
+# CatBoost部分（同色で透明度を変えて区別）
+bars_cat = ax.barh(
+    plot_df['feature'], cat_vals,
+    left=lgbm_vals,
+    color=bar_colors, alpha=0.45,
+    label=f'CatBoost (w={1-w_lgbm:.2f})'
+)
+
+# ％ラベルをバー右端に表示
+for i, (feature, total) in enumerate(zip(plot_df['feature'], total_vals)):
+    ax.text(total + 0.08, i, f'{total:.2f}%',
+            va='center', ha='left', fontsize=9, color='#333333', fontweight='bold')
+
+# x軸の余白（ラベルが切れないように）
+ax.set_xlim(0, max(total_vals) * 1.15)
+
+# タイトル・ラベル
+plt.title('Ensemble Feature Importance (≧ 1%)', fontsize=14, pad=20, color='#333333')
+plt.xlabel('Contribution Percentage (%)', fontsize=11, color='#666666')
+plt.ylabel('Feature', fontsize=11, color='#666666')
+
+# グリッド
+ax.xaxis.grid(True, linestyle='--', which='major', color='#EEEEEE', alpha=0.8)
+ax.set_axisbelow(True)
+
+# 凡例（LGBM=濃い、CatBoost=薄い を示す）
+from matplotlib.patches import Patch
+legend_elements = [
+    Patch(facecolor='#4A7C6F', alpha=0.85, label=f'LGBM (w={w_lgbm:.2f})'),
+    Patch(facecolor='#4A7C6F', alpha=0.40, label=f'CatBoost (w={1-w_lgbm:.2f})')
+]
+ax.legend(handles=legend_elements, frameon=False, loc='lower right', fontsize=10)
+
+plt.tight_layout()
+plt.show()
+
 #3-1　SHAP　設定とモデル復元
 
 # 強制的なメモリ解放
@@ -592,7 +657,7 @@ summary = pd.DataFrame({
 })
 print(summary.to_markdown(index=False))
 
-#5-1　アンサンブル閾値　可視化
+#5-1　アンサンブル配分AUC　可視化
 weights, aucs = zip(*weight_results)
 plt.figure(figsize=(10, 5))
 plt.plot(weights, aucs)
@@ -610,9 +675,9 @@ plt.show()
 今回のデータでは細分化されているカラムがあり、LGBM単体ではやや過学習に陥りやすい傾向にあった。その点はCATとアンサンブルさせることでバランスの取れた構成になったことが寄与度や、アンサンブル閾値グラフから読み取れる。  
 また、寄与度からは追加した特徴量が多くランクインしたがEXT系が支配的な点は変わらず、有効なものを作る難しさを実感した。
 
-【Precision-Recall】
-正常判定の自動化において、閾値を厳しくすれば正常判定件数が少なく、緩くすれば精度が低くなり、自動化件数と精度はトレードオフの関係にある。今回のケースであれば精度99%は15%程度しか業務量が削減できない上に、デフォルトの割合は9%であるため、人間による判定に負担が大きい。  
+【Precision-Recall】  
+正常判定の自動化において、閾値を厳しくすれば正常判定件数が少なく、緩くすれば精度が低くなり、自動承認と精度はトレードオフの関係にある。今回のケースであれば精度99%は15%程度しか自動承認できない上に、デフォルトのプレシジョンは9%であるため、デフォルト判定された申請で人間による2次審査を行うとすると量・質ともに負担が大きい。  
 一方で95%ラインであれば業務量の86%を自動化できるが、自動承認した中の5%がデフォルトする。  
 この点については、企業の抱える与信判定のノウハウやキャパシティ、人的コストとのバランスを見て決定すべき事項と考えられる。  
-当該コンペにおいては通貨が不明であるため金額ベースの判断は困難だが、自動化率と精度のバランスから0.94〜0.97あたりが現実的な選択肢だと思われる。
+当該コンペにおいては通貨が不明であるため金額ベースの判断は困難だが、自動承認率と精度のバランスから0.94〜0.97あたりが現実的な選択肢だと思われる。
 """

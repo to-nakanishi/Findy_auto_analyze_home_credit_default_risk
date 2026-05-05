@@ -85,61 +85,136 @@ print(f"※Lambdaの/tmpは512MBまで使用可能")
 
 '''
 =================================================================
-AWSデプロイ手順（GUIベース）
+AWSデプロイ手順
 =================================================================
 
-■ 手順1: S3バケットの作成
+■ アーキテクチャ概要
+  GitHub → GitHub Actions → ECR（Dockerイメージ） → Lambda → API Gateway
+  pushするだけで自動ビルド・デプロイされるCI/CDパイプライン
+
+■ 手順1: S3バケットの作成（モデル保管用）
   1. AWSコンソール → S3 → バケットを作成
-  2. バケット名: home-credit-model-bucket（任意）
-  3. リージョン: ap-northeast-1（大阪に近いリージョン）
+  2. バケット名: my-home-credit-model-2026-tn
+  3. リージョン: ap-northeast-1（東京）
   4. lgbm_fold0.pkl を models/ フォルダにアップロード
 
 ■ 手順2: ECRリポジトリの作成
   1. AWSコンソール → ECR → リポジトリを作成
   2. リポジトリ名: home-credit-predictor
-  3. ローカルまたはCloud Shellで以下を実行:
 
-     # ECRにログイン
-     aws ecr get-login-password --region ap-northeast-1 | \
-       docker login --username AWS --password-stdin {ACCOUNT_ID}.dkr.ecr.ap-northeast-1.amazonaws.com
+■ 手順3: IAMユーザーの作成（GitHub Actions用）
+  1. AWSコンソール → IAM → ユーザー → ユーザーの作成
+  2. ユーザー名: github-actions-user
+  3. 以下のポリシーをアタッチ:
+     - AmazonEC2ContainerRegistryPowerUser（ECRプッシュ用）
+     - AWSLambda_FullAccess（Lambda更新用）
+  4. アクセスキーを発行
 
-     # Dockerイメージのビルド
-     docker build -t home-credit-predictor .
+■ 手順4: GitHubリポジトリにSecretsを登録
+  1. リポジトリ → Settings → Secrets and variables → Actions
+  2. 以下3つをRepository secretsとして登録:
+     - AWS_ACCESS_KEY_ID（手順3で発行）
+     - AWS_SECRET_ACCESS_KEY（手順3で発行）
+     - AWS_ACCOUNT_ID
 
-     # タグ付けとプッシュ
-     docker tag home-credit-predictor:latest \
-       {ACCOUNT_ID}.dkr.ecr.ap-northeast-1.amazonaws.com/home-credit-predictor:latest
-     docker push \
-       {ACCOUNT_ID}.dkr.ecr.ap-northeast-1.amazonaws.com/home-credit-predictor:latest
+■ 手順5: リポジトリにデプロイファイルを追加
+  以下のファイルをGitHubリポジトリに追加:
 
-■ 手順3: Lambda関数の作成
-  1. AWSコンソール → Lambda → 関数の作成
-  2. 「コンテナイメージ」を選択
-  3. 関数名: home-credit-predictor
-  4. コンテナイメージURI: 手順2でプッシュしたイメージを選択
-  5. アーキテクチャ: x86_64
-  6. 作成後に設定を変更:
-     - メモリ: 1024MB（モデル読込に必要）
-     - タイムアウト: 60秒（コールドスタート対策）
-     - 環境変数:
-       MODEL_BUCKET = home-credit-model-bucket
-       MODEL_KEY = models/lgbm_fold0.pkl
-       THRESHOLD = 0.24
-  7. 実行ロールにS3読取権限（AmazonS3ReadOnlyAccess）を追加
+  deploy/Dockerfile:
+    FROM public.ecr.aws/lambda/python:3.12
+    RUN dnf install -y libgomp && dnf clean all
+    RUN pip install --no-cache-dir --only-binary :all: \
+        lightgbm==4.3.0 numpy scipy
+    COPY lambda_function.py ${LAMBDA_TASK_ROOT}/
+    CMD ["lambda_function.lambda_handler"]
 
-■ 手順4: API Gatewayの作成
-  1. AWSコンソール → API Gateway → REST APIを作成
-  2. API名: home-credit-api
-  3. リソース /predict を作成
-  4. POSTメソッドを追加 → Lambda関数と統合
-  5. APIをデプロイ（ステージ名: prod）
+  deploy/lambda_function.py:
+    推論用Lambda関数（S3からモデル読込 → 予測 → JSON返却）
+
+  .github/workflows/deploy.yml:
+    pushトリガーでDockerビルド → ECRプッシュ → Lambda更新を自動実行
+
+  ※ deploy/ 配下のファイルを変更してpushすると自動デプロイが走る
+
+■ 手順6: Lambda関数の初回作成
+  GitHub Actionsが初回実行時に自動でLambda関数を作成:
+    - パッケージタイプ: コンテナイメージ
+    - メモリ: 1024MB（モデル読込に必要）
+    - タイムアウト: 60秒（コールドスタート対策）
+    - 環境変数:
+      MODEL_BUCKET = my-home-credit-model-2026-tn
+      MODEL_KEY = models/lgbm_fold0.pkl
+      THRESHOLD = 0.24
+    - 実行ロールにS3読取権限（AmazonS3ReadOnlyAccess）を付与
+
+■ 手順7: API Gatewayの作成（CloudShellで実行）
+  1. REST API作成（API名: home-credit-api）
+  2. /predict リソースを作成
+  3. POSTメソッドを追加 → Lambda関数とプロキシ統合
+  4. Lambdaに実行権限を付与
+  5. prod ステージにデプロイ
   6. エンドポイントURLが発行される
 
 ■ テスト方法
   curl -X POST \
     https://{api-id}.execute-api.ap-northeast-1.amazonaws.com/prod/predict \
     -H "Content-Type: application/json" \
-    -d @sample_event.json
+    -d '{"features": {"EXT_SOURCE_2": 0.5, "EXT_SOURCE_3": 0.3}}'
 
-=================================================================
+  レスポンス例:
+    {
+      "probability": 0.073,
+      "threshold": 0.24,
+      "decision": "auto_approve",
+      "features_received": 2
+    }
+
+■ デプロイ時に遭遇した問題と解決策
+  1. zipデプロイの250MB制限
+     lightgbm + scipy + numpy の依存関係がLambdaのzip上限250MBを超過。
+     → Docker（ECR）方式に切り替えて10GB上限で解決。
+
+  2. NumPyのGCCバージョン要求
+     Python 3.11ベースイメージ（Amazon Linux 2, GCC 7.3）では
+     NumPy 2.x のビルドに必要な GCC >= 9.3 を満たせない。
+     → Python 3.12ベースイメージ（Amazon Linux 2023）に変更し、
+        --only-binary :all: でビルド済みwheelのみ使用。
+
+  3. libgomp不足
+     LightGBMが並列処理に必要とするlibgomp.so.1が
+     Lambdaベースイメージに含まれていない。
+     → Dockerfileに dnf install -y libgomp を追加。
 '''
+
+#2-1　簡易テスト
+import requests
+
+url = "https://0roeepf6u2.execute-api.ap-northeast-1.amazonaws.com/prod/predict"
+response = requests.post(url, json={"features": {"EXT_SOURCE_2": 0.5}})
+print(response.json())
+
+#2-2　テスト(自動承認、2次審査)
+
+import json
+
+# TARGET=0（正常返済）から1件
+row_good = df[df["TARGET"] == 0].sample(1, random_state=42).drop(columns=["TARGET"]).iloc[0]
+row_good = row_good[row_good.index.isin(df.select_dtypes(include="number").columns)]
+features_good = {k: (None if pd.isna(v) else float(v)) for k, v in row_good.items()}
+
+print("=" * 60)
+print("テスト1: 正常返済の実レコード")
+print("=" * 60)
+response = requests.post(url, json={"features": features_good})
+print(json.dumps(response.json(), indent=2))
+
+# TARGET=1（デフォルト）から1件
+row_bad = df[df["TARGET"] == 1].sample(1, random_state=42).drop(columns=["TARGET"]).iloc[0]
+row_bad = row_bad[row_bad.index.isin(df.select_dtypes(include="number").columns)]
+features_bad = {k: (None if pd.isna(v) else float(v)) for k, v in row_bad.items()}
+
+print("\n" + "=" * 60)
+print("テスト2: デフォルトの実レコード")
+print("=" * 60)
+response = requests.post(url, json={"features": features_bad})
+print(json.dumps(response.json(), indent=2))
